@@ -405,12 +405,16 @@ input {
 .workspace {
   display: grid;
   grid-template-columns: 250px 1fr;
+  /* The row must not grow with its content (tall drum grids, many tracks):
+     the editor and the track list scroll inside it instead. */
+  grid-template-rows: minmax(0, 1fr);
   height: min(62vh, 640px);
   min-height: 380px;
   border-bottom: 1px solid var(--border);
 }
 
 .tracks {
+  min-height: 0;
   background: var(--panel);
   border-right: 1px solid var(--border);
   overflow-y: auto;
@@ -526,6 +530,7 @@ input {
 
 .editor {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--roll-bg);
@@ -615,10 +620,30 @@ input {
 .seq-knobs .knob {
   --kc: var(--accent-2);
 }
-.seq-cells {
+.seq-cells,
+.seq-bars {
   display: grid;
-  grid-template-columns: repeat(var(--steps, 16), 34px);
+  grid-template-columns: repeat(var(--steps, 16), var(--cell, 34px));
   gap: 4px;
+}
+.seq-bars span {
+  grid-column: span 16;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-left: 2px solid var(--border-2);
+  padding-left: 6px;
+}
+.seq-name-spacer {
+  width: 92px;
+}
+.seq-knobs-spacer {
+  width: 138px;
+}
+.seq-cell.bar-start {
+  box-shadow: -4px 0 0 -2px var(--border-2);
 }
 .seq-cell {
   height: 34px;
@@ -910,6 +935,7 @@ kbd {
 @media (max-width: 900px) {
   .workspace {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
     height: auto;
   }
   .tracks {

@@ -4,6 +4,10 @@
 import type { DrumSound, DrumTrack, DrumVoice, Note, Patch, Project, SynthTrack, Track } from './types';
 import { defaultFx, findPreset, initPatch } from './presets';
 
+export const BAR_OPTIONS = [1, 2, 4, 8, 16, 32];
+/** Drum pattern lengths in 16th steps (1 bar … 32 bars). */
+export const STEP_OPTIONS = [16, 32, 64, 128, 256, 512];
+
 export const TRACK_COLORS = ['#ff7a45', '#36cfc9', '#9b7bff', '#ffc53d', '#f759ab'];
 const DRUM_KEYS: DrumVoice[] = ['kick', 'snare', 'clap', 'chh', 'ohh', 'tom', 'rim', 'perc'];
 
@@ -154,7 +158,7 @@ export function normalizeProject(raw: unknown): Project {
   const tracks: Track[] = r.tracks.map((t, i) => {
     if (t.kind === 'drums') {
       const d = fill(drumTrack(), t);
-      d.steps = t.steps === 32 ? 32 : 16;
+      d.steps = STEP_OPTIONS.includes(t.steps) ? t.steps : 16;
       for (const k of DRUM_KEYS) {
         const src = (t as DrumTrack).pattern?.[k] ?? [];
         d.pattern[k] = Array.from({ length: d.steps }, (_, j) => (src[j] === 2 ? 2 : src[j] ? 1 : 0));
@@ -172,11 +176,9 @@ export function normalizeProject(raw: unknown): Project {
     }));
     return s;
   });
-  return {
-    ...fill(base, { ...r, tracks: undefined }),
-    version: 1,
-    tracks,
-  };
+  const out = { ...fill(base, { ...r, tracks: undefined }), version: 1 as const, tracks };
+  if (!BAR_OPTIONS.includes(out.bars)) out.bars = BAR_OPTIONS.find((b) => b >= out.bars) ?? 32;
+  return out;
 }
 
 // ── Store ────────────────────────────────────────────────────────────────

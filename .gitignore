@@ -2,3 +2,7 @@ node_modules
 dist
 .DS_Store
 .claude
+
+# Rendered audio stays on this machine, never in the repo
+*.wav
+*.mp3

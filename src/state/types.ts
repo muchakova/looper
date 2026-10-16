@@ -99,7 +99,7 @@ export interface DrumTrack extends Channel {
   kind: 'drums';
   name: string;
   color: string;
-  steps: number; // 16 or 32
+  steps: number; // pattern length in 16th steps: 16, 32, 64 … 512
   pattern: Record<DrumVoice, number[]>; // 0 off, 1 normal, 2 accent
   sounds: Record<DrumVoice, DrumSound>;
   fx: Fx;

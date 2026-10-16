@@ -4,7 +4,7 @@
 import { changed, commit, togglePlay, transport } from '../app';
 import { encodeWav, peakDb, renderProject, type ExportOptions } from '../audio/export';
 import { NOTE_NAMES, SCALES } from '../state/music';
-import { blankProject, demoProject, normalizeProject, store } from '../state/project';
+import { BAR_OPTIONS, blankProject, demoProject, normalizeProject, store } from '../state/project';
 import { h, icon, segmented, select, toast } from './dom';
 import { fmt, knob } from './knob';
 import { Scope } from './scope';
@@ -45,19 +45,14 @@ export class TopBar {
     this.controls.push({ refresh: () => (this.bpmInput.value = String(P().bpm)) });
 
     const bars = add(
-      segmented<number>(
-        [
-          [1, '1'],
-          [2, '2'],
-          [4, '4'],
-          [8, '8'],
-        ],
-        () => P().bars,
+      select(
+        BAR_OPTIONS.map((b) => [String(b), String(b)] as [string, string]),
+        () => String(P().bars),
         (v) => {
-          P().bars = v;
+          P().bars = +v;
           commit('all');
         },
-        { 'aria-label': 'Loop length in bars', title: 'Loop length in bars' },
+        { 'aria-label': 'Length in bars', title: 'Length in bars: 1–8 for short loops, 16–32 for a whole piece' },
       ),
     );
 

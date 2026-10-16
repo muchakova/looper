@@ -34,17 +34,22 @@ export async function renderProject(
   const engine = new Engine(ctx, () => proj);
   engine.restartModulation(0);
 
-  // Schedule one loop at a time using suspend/resume to keep memory low.
+  // Schedule one bar at a time using suspend/resume: only the notes about to
+  // play exist in the graph, which keeps long pieces fast and memory low.
   const canSuspend = typeof ctx.suspend === 'function';
-  engine.scheduleRange(0, L, beatToTime);
-  if (canSuspend && loops > 1) {
-    for (let k = 1; k < loops; k++) {
-      const at = k * loopSec - Math.min(0.5, loopSec / 2);
+  const totalBeats = loops * L;
+  const chunk = Math.min(4, L);
+  const chunks = Math.ceil(totalBeats / chunk);
+  engine.scheduleRange(0, chunk, beatToTime);
+  if (canSuspend && chunks > 1) {
+    const chunkSec = beatToTime(chunk);
+    for (let k = 1; k < chunks; k++) {
+      const at = k * chunkSec - Math.min(0.5, chunkSec / 2);
       ctx
         .suspend(at)
         .then(() => {
-          engine.scheduleRange(k * L, (k + 1) * L, beatToTime);
-          onProgress?.(k / loops);
+          engine.scheduleRange(k * chunk, Math.min(totalBeats, (k + 1) * chunk), beatToTime);
+          onProgress?.(k / chunks);
           return ctx.resume();
         })
         .catch(() => {
@@ -52,7 +57,7 @@ export async function renderProject(
         });
     }
   } else {
-    engine.scheduleRange(L, loops * L, beatToTime);
+    engine.scheduleRange(chunk, totalBeats, beatToTime);
   }
 
   const full = await ctx.startRendering();

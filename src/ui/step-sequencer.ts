@@ -3,9 +3,9 @@
 
 import { changed, commit, ensureAudio, engine, audioCtx, transport } from '../app';
 import { DRUM_LABELS, DRUM_VOICES } from '../audio/drums';
-import { store } from '../state/project';
+import { STEP_OPTIONS, store } from '../state/project';
 import type { DrumTrack, DrumVoice } from '../state/types';
-import { h, segmented } from './dom';
+import { h } from './dom';
 import { fmt, knob, type Knob } from './knob';
 
 type Pat = Partial<Record<DrumVoice, string>>;
@@ -65,20 +65,14 @@ export class StepSequencer {
   private cells: Record<string, HTMLButtonElement[]> = {};
   private knobs: Knob[] = [];
   private grid: HTMLElement;
-  private stepsSeg: ReturnType<typeof segmented<number>>;
+  private stepsSel: HTMLSelectElement;
   private paint: number | null = null;
   private lastStep = -1;
 
   constructor() {
     this.grid = h('div', { class: 'seq-grid' });
-    this.stepsSeg = segmented<number>(
-      [
-        [16, '16 steps'],
-        [32, '32 steps'],
-      ],
-      () => this.track().steps,
-      (v) => this.setSteps(v),
-    );
+    this.stepsSel = h('select', { class: 'sel', 'aria-label': 'Pattern length', title: 'Pattern length: a longer pattern lets the drums change from section to section' });
+    this.stepsSel.addEventListener('change', () => this.setSteps(+this.stepsSel.value));
     const patSel = h(
       'select',
       { class: 'sel', 'aria-label': 'Load pattern', title: 'Load a ready-made drum pattern' },
@@ -95,7 +89,7 @@ export class StepSequencer {
       h(
         'div',
         { class: 'editor-toolbar' },
-        this.stepsSeg,
+        h('label', { class: 'tb-field' }, h('span', {}, 'Pattern'), this.stepsSel),
         patSel,
         h('button', { class: 'btn ghost', type: 'button', onclick: () => this.clear() }, 'Clear'),
         h('div', { class: 'tb-hint' }, 'Click — hit · Shift/right-click — accent · Drag — paint · Click a name — listen'),
@@ -127,11 +121,23 @@ export class StepSequencer {
   /** Rebuild the grid from the project. */
   refresh(): void {
     const t = this.track();
-    this.stepsSeg.refresh();
+    // Offer pattern lengths up to the song length (at least 2 bars)
+    const maxSteps = Math.max(32, store.project.bars * 16, t.steps);
+    this.stepsSel.replaceChildren(
+      ...STEP_OPTIONS.filter((n) => n <= maxSteps).map((n) => h('option', { value: String(n) }, `${n / 16} bar${n > 16 ? 's' : ''}`)),
+    );
+    this.stepsSel.value = String(t.steps);
     this.grid.replaceChildren();
     this.cells = {};
     this.knobs = [];
     this.grid.style.setProperty('--steps', String(t.steps));
+    this.grid.style.setProperty('--cell', t.steps > 32 ? '24px' : '34px');
+    if (t.steps > 16) {
+      // Bar numbers above the grid
+      const bars = h('div', { class: 'seq-bars' });
+      for (let b = 0; b < t.steps / 16; b++) bars.append(h('span', {}, `Bar ${b + 1}`));
+      this.grid.append(h('div', { class: 'seq-row seq-head' }, h('div', { class: 'seq-name-spacer' }), h('div', { class: 'seq-knobs-spacer' }), bars));
+    }
     for (const v of DRUM_VOICES) {
       const s = () => this.track().sounds[v];
       const name = h(
@@ -149,7 +155,7 @@ export class StepSequencer {
       const row = h('div', { class: 'seq-cells' });
       for (let i = 0; i < t.steps; i++) {
         const c = h('button', {
-          class: `seq-cell ${Math.floor(i / 4) % 2 ? 'alt' : ''}`,
+          class: `seq-cell ${Math.floor(i / 4) % 2 ? 'alt' : ''} ${i % 16 === 0 && i > 0 ? 'bar-start' : ''}`,
           type: 'button',
           'aria-label': `${DRUM_LABELS[v]} step ${i + 1}`,
         });
