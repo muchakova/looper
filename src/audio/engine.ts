@@ -3,7 +3,8 @@
 // It works with any BaseAudioContext, so live playback and offline WAV export
 // share exactly the same code.
 
-import type { DrumTrack, Project, SynthTrack } from '../state/types';
+import type { DrumTrack, Note, Project, SynthTrack } from '../state/types';
+import { cycleLength, shouldPlay } from '../state/conditions';
 import { fxTail, type Timing } from './channel';
 import { DrumEngine, DRUM_VOICES } from './drums';
 import { softClipCurve } from './dsp';
@@ -144,40 +145,65 @@ export class Engine {
       this.restartModulation(beatToTime(k * L));
     }
 
+    const cycle = cycleLength(p);
+
     p.tracks.forEach((t, ti) => {
       if (t.kind === 'synth') {
         const eng = this.synth(ti)!;
-        const events: { at: number; end: number; pitch: number; vel: number; id: number; fresh: boolean }[] = [];
-        // Notes at the earliest position start a fresh mono voice every repetition
-        let first = Infinity;
-        let firstPitch = Infinity;
-        for (const n of t.notes) if (n.start < L) first = Math.min(first, n.start);
-        for (const n of t.notes) if (n.start === first) firstPitch = Math.min(firstPitch, n.pitch);
+        const ordered = t.notes.filter((n) => n.start < L).sort((x, y) => x.start - y.start || x.pitch - y.pitch);
+        // Chance seeds come from the note's position, so they survive save/load.
+        const trigSeed = (n: Note) => Math.round(n.start * 96) * 131 + n.pitch * 7 + ti * 1009;
+        const plays = (n: Note, pass: number) => shouldPlay(n, pass, trigSeed(n), cycle);
+        // The first note that plays in a pass starts a fresh mono voice, so a
+        // voice never runs across the loop point (seamless repeats).
+        const firstOf = new Map<number, Note | undefined>();
+        const firstIn = (pass: number) => {
+          if (!firstOf.has(pass)) firstOf.set(pass, ordered.find((n) => plays(n, pass)));
+          return firstOf.get(pass);
+        };
+        const events: { at: number; end: number; n: Note; fresh: boolean }[] = [];
         const k0 = Math.floor((from - SWING_MAX) / L);
         const k1 = Math.floor(to / L);
         for (let k = k0; k <= k1; k++) {
-          for (const n of t.notes) {
+          for (const n of ordered) {
             const at = k * L + swung(n.start);
-            if (at >= from && at < to && n.start < L) events.push({ at, end: k * L + n.start + n.dur, pitch: n.pitch, vel: n.vel, id: n.id, fresh: n.start === first && n.pitch === firstPitch });
+            if (at < from || at >= to || !plays(n, k)) continue;
+            events.push({ at, end: k * L + n.start + n.dur, n, fresh: firstIn(k) === n });
           }
         }
-        events.sort((a, b) => a.at - b.at || a.pitch - b.pitch);
-        for (const e of events) eng.playNote(e.pitch, e.vel, beatToTime(e.at), beatToTime(Math.max(e.end, e.at + 0.02)), e.id * 7919 + ti, e.fresh);
+        events.sort((a, b) => a.at - b.at || a.n.pitch - b.n.pitch);
+        for (const e of events) {
+          const { n } = e;
+          const mods = n.cutoff !== undefined || n.res !== undefined || n.pan !== undefined ? { cutoff: n.cutoff, res: n.res, pan: n.pan } : undefined;
+          // Voice phases are seeded from the note's position too, so the same
+          // project renders bit-identically every time, even after reloading.
+          eng.playNote(n.pitch, n.vel, beatToTime(e.at), beatToTime(Math.max(e.end, e.at + 0.02)), trigSeed(n) * 7919 + ti, e.fresh, mods);
+        }
       } else {
         const eng = this.drums(ti)!;
         const stepLen = 0.25;
-        const i0 = Math.floor((from - SWING_MAX) / stepLen);
-        const i1 = Math.ceil(to / stepLen);
+        // Look one step further back: micro-timing can pull a hit earlier.
+        const i0 = Math.floor((from - SWING_MAX) / stepLen) - 1;
+        const i1 = Math.ceil(to / stepLen) + 1;
         for (let i = i0; i <= i1; i++) {
           if (i < 0) continue;
           const base = i * stepLen;
-          const at = swung(base);
-          if (at < from || at >= to) continue;
-          const inLoop = base % L;
+          const pass = Math.floor(base / L + 1e-9);
+          const inLoop = base - pass * L;
           const step = Math.round(inLoop / stepLen) % t.steps;
           DRUM_VOICES.forEach((v, vi) => {
             const val = t.pattern[v][step];
-            if (val) eng.trigger(v, val === 2 ? 1 : 0.72, beatToTime(at), step * 101 + vi * 7 + 1);
+            if (!val) return;
+            const lock = t.locks?.[v]?.[step];
+            const seed = step * 101 + vi * 7 + 1;
+            const at = swung(base) + (lock?.nudge ?? 0) * stepLen;
+            if (at < from || at >= to || !shouldPlay(lock, pass, seed, cycle)) return;
+            const vel = val === 2 ? 1 : 0.72;
+            const hits = lock?.ratchet ?? 1;
+            for (let j = 0; j < hits; j++) {
+              // Ratchet: repeat the hit inside its step, slightly softer each time
+              eng.trigger(v, vel * (1 - 0.18 * (j / hits)), beatToTime(at + (j * stepLen) / hits), seed + j * 13, lock);
+            }
           });
         }
       }

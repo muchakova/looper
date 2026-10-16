@@ -5,7 +5,7 @@
 
 import { commit, transport } from '../app';
 import { blankProject, newNoteId, store } from '../state/project';
-import type { DrumTrack, DrumVoice, Note, SynthTrack, Track } from '../state/types';
+import type { DrumTrack, DrumVoice, Note, StepParams, SynthTrack, Track } from '../state/types';
 import { h } from './dom';
 import type { PianoRoll } from './piano-roll';
 
@@ -520,6 +520,80 @@ export class Tutorial {
         ...changedSince(() => store.project.tracks.map((t) => [t.solo, t.mute, t.volume.toFixed(2), t.pan.toFixed(2)])),
       },
       {
+        title: 'Всеки удар — различен (Step lane)',
+        body: `<p>Професионалните грувбокси (Elektron, Fors Opal) позволяват <b>всяка стъпка да звучи различно</b>. Това прави ритъма жив, без да добавяш нови писти.</p>
+<p>Избери <b>Drums</b> и погледни лентата <b>STEP LANE</b> под мрежата:</p>
+<ol><li>Избери барабан (например <b>Closed hat</b>) — или просто кликни името му.</li>
+<li>Избери параметър и <b>влачи стълбчетата</b> нагоре/надолу. Десен клик връща стойността.</li></ol>
+<ul><li><b>Tune / Pan</b> — всеки хет с различен тон и позиция;</li>
+<li><b>Ratchet</b> — 2–4 бързи удара в една стъпка (ролки);</li>
+<li><b>Nudge</b> — удар малко по-рано или по-късно;</li>
+<li><b>Chance</b> и <b>Condition</b> — ударът свири само понякога (например <b>2:4</b> = на 2-рия от всеки 4 пъти).</li></ul>
+<p>Синя точка в клетката = заключена стойност, малко квадратче = условие.</p>`,
+        target: () => (isSelected('', 'drums') ? document.querySelector('.seq-lane-row') : trackRow('', 'drums')),
+        task: 'Промени поне една стъпка в Step lane.',
+        ...changedSince(() => drumTrack()?.locks ?? {}),
+        actions: [
+          { label: 'Избери Drums', run: () => selectTrack('', 'drums') },
+          {
+            label: 'Покажи ми пример',
+            run: () => {
+              selectTrack('', 'drums');
+              const d = drumTrack();
+              if (!d) return;
+              const tunes = [0, 3, -2, 5, 0, 7, -3, 2];
+              const chh: Record<number, StepParams> = {};
+              d.pattern.chh.forEach((on, i) => {
+                if (on) chh[i] = { tune: tunes[i % 8], pan: i % 4 < 2 ? -0.4 : 0.4 };
+              });
+              // A roll on the last hat, only on every 4th pass
+              let last = -1;
+              d.pattern.chh.forEach((on, i) => on && (last = i));
+              if (last >= 0) chh[last] = { ...chh[last], ratchet: 3, cond: [4, 4] };
+              d.locks = { ...(d.locks ?? {}), chh };
+              commit('all');
+            },
+          },
+        ],
+      },
+      {
+        title: 'Звук и условие за всяка нота',
+        body: `<p>Същото работи и за нотите. В лентата под piano roll-а избери от <b>Lane</b> (над нотите):</p>
+<ul><li><b>Cutoff / Resonance</b> — една нота по-ярка, друга по-тъмна (класически „acid“ бас);</li>
+<li><b>Pan</b> — нотата отляво или отдясно;</li>
+<li><b>Chance</b> — вероятност нотата да прозвучи;</li>
+<li><b>Condition</b> — клик върху нотата избира кога свири, например <b>2:2</b> = само на всеки втори път.</li></ul>
+<p>Нотите с условие са с <b>пунктирана рамка</b>. Когато loop-ът се променя от повторение на повторение, горе до BPM се появява <b>Pass 1/4</b>, <b>2/4</b>… — броячът на повторенията.</p>`,
+        target: () => (store.track.kind === 'synth' ? document.querySelector('[aria-label="Note lane"]') : trackRow('Lead')),
+        task: 'Сложи заключване или условие на поне една нота.',
+        ...changedSince(() => synths().map((t) => t.notes.map((x) => [x.cutoff, x.res, x.pan, x.chance, x.cond]))),
+        actions: [
+          {
+            label: 'Избери Lead + Condition',
+            run: () => {
+              selectTrack('Lead');
+              roll.setLane('cond');
+            },
+          },
+          {
+            label: 'Покажи ми пример',
+            run: () => {
+              selectTrack('Lead');
+              const t = synthTrack('Lead');
+              if (!t || !t.notes.length) return;
+              const L = store.project.bars * 4;
+              // The second half of the melody now only plays every other pass
+              for (const n of t.notes) if (n.start >= L / 2) n.cond = [2, 2];
+              t.notes.forEach((n, i) => {
+                if (i % 3 === 1) n.cutoff = -1.5;
+              });
+              roll.setLane('cond');
+              commit('all');
+            },
+          },
+        ],
+      },
+      {
         title: 'Запази проекта',
         body: `<p>Проектът се пази <b>автоматично</b> в този браузър. За да имаш файл (резервно копие или за друг компютър), натисни иконата <b>дискета</b> или <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>S</kbd>. Иконата <b>папка</b> отваря записан проект.</p>`,
         target: q('.tb-file'),
@@ -528,6 +602,7 @@ export class Tutorial {
         title: 'Изнеси WAV за видеото',
         body: `<p>Натисни <b>Export WAV</b> и избери:</p>
 <ul><li><b>48 kHz</b> и <b>24-bit</b> — стандарт за видео;</li><li><b>Seamless loop: On</b> — файлът се повтаря без щракане;</li><li><b>Repeats ×1</b> — в монтажната програма просто го копираш или зациклиш.</li></ul>
+<p>Ако си сложил условия (Chance или Condition), loop-ът се променя през няколко повторения. Тогава файлът автоматично съдържа <b>целия цикъл</b> (например 4 повторения), за да остане безшевен.</p>
 <p>Натисни <b>Render &amp; download</b>. В програмата за монтаж сложи WAV-а на аудио писта и го повтори колкото пъти ти трябва.</p>`,
         target: q('.topbar .btn.primary'),
         task: 'Отвори прозореца Export WAV.',
@@ -540,6 +615,7 @@ export class Tutorial {
 <ul><li>Смени <b>Scale</b> на <b>Major</b> за весело настроение или <b>Dorian</b> за лек джаз.</li>
 <li>Завърти <b>Swing</b> горе — ритъмът започва да „люлее“ (страхотно за lo-fi и хип-хоп).</li>
 <li>Пробвай другите ритми от <b>Load pattern…</b> и пресетите в категория <b>Rock</b>.</li>
+<li>От менюто <b>New… → Samples</b> отвори <b>Step Lock Groove</b> — там всеки хет е различен, а някои удари свирят само понякога.</li>
 <li>От менюто <b>New… → Demo loop</b> можеш да разгледаш готов пример.</li></ul>
 <p>Туториалът винаги е под бутона <b>?</b> горе.</p>`,
       },

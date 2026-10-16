@@ -126,14 +126,18 @@ export function pulseWave(ctx: BaseAudioContext, pw: number): PeriodicWave {
   return wave;
 }
 
-/** Freeze a param's current automation at `t` (Firefox lacks cancelAndHold). */
+/**
+ * Freeze a param's automation at `t` so new automation can continue from the
+ * value it has there.
+ *
+ * Firefox has no cancelAndHoldAtTime. There we only drop the events from `t`
+ * on: the curve already running at `t` (e.g. an envelope's decay) then hands
+ * its value at `t` to the next setTarget/ramp. Reading `param.value` instead
+ * would give the value *now*, which for notes scheduled ahead of time is
+ * usually 0 and would cut every release short with a click.
+ */
 export function holdAt(param: AudioParam, t: number): void {
   const p = param as AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam };
-  if (p.cancelAndHoldAtTime) {
-    p.cancelAndHoldAtTime(t);
-  } else {
-    const v = param.value;
-    param.cancelScheduledValues(t);
-    param.setValueAtTime(v, t);
-  }
+  if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t);
+  else param.cancelScheduledValues(t);
 }

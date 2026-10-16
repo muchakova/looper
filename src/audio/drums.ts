@@ -1,6 +1,6 @@
 // Synthesized drum kit (808/909-inspired) feeding its own channel strip.
 
-import type { DrumSound, DrumTrack, DrumVoice } from '../state/types';
+import type { DrumSound, DrumTrack, DrumVoice, StepParams } from '../state/types';
 import { ChannelStrip, type Timing } from './channel';
 import { mulberry32, noiseBuffer } from './dsp';
 
@@ -23,6 +23,8 @@ export class DrumEngine {
   readonly strip: ChannelStrip;
   private openHat: GainNode | null = null;
   private rand = mulberry32(99);
+  /** Pan of the hit being built (per-step lock); 0 = centre, no panner. */
+  private hitPan = 0;
 
   constructor(
     private readonly ctx: BaseAudioContext,
@@ -42,12 +44,19 @@ export class DrumEngine {
     this.strip.restartModulation(t);
   }
 
-  /** `seed` makes noise identical on every loop repetition (seamless export). */
-  trigger(voice: DrumVoice, vel: number, t: number, seed = Math.random() * 1e9): void {
-    const s = this.getTrack().sounds[voice];
+  /**
+   * `seed` makes noise identical on every loop repetition (seamless export).
+   * `lock` overrides the row's tune/decay/level/pan for this one hit.
+   */
+  trigger(voice: DrumVoice, vel: number, t: number, seed = Math.random() * 1e9, lock?: StepParams): void {
+    const base = this.getTrack().sounds[voice];
+    const s: DrumSound = lock
+      ? { tune: lock.tune ?? base.tune, decay: lock.decay ?? base.decay, level: lock.level ?? base.level }
+      : base;
     const g = vel * s.level;
     if (g <= 0) return;
     this.rand = mulberry32(seed);
+    this.hitPan = lock?.pan ?? 0;
     switch (voice) {
       case 'kick':
         return this.kick(s, g, t);
@@ -73,8 +82,18 @@ export class DrumEngine {
     amp.gain.setValueAtTime(0, t);
     amp.gain.linearRampToValueAtTime(gain, t + 0.001);
     amp.gain.setTargetAtTime(0, t + 0.001, decay / 5);
-    amp.connect(this.strip.input);
+    this.connectOut(amp);
     return amp;
+  }
+
+  private connectOut(node: AudioNode): void {
+    if (Math.abs(this.hitPan) > 0.001) {
+      const pan = this.ctx.createStereoPanner();
+      pan.pan.value = this.hitPan;
+      node.connect(pan).connect(this.strip.input);
+    } else {
+      node.connect(this.strip.input);
+    }
   }
 
   private noise(t: number, dur: number): AudioBufferSourceNode {
@@ -144,7 +163,7 @@ export class DrumEngine {
     bp.frequency.value = 1300 * tune;
     bp.Q.value = 1.4;
     const amp = ctx.createGain();
-    amp.connect(this.strip.input);
+    this.connectOut(amp);
     bp.connect(amp);
     const dur = 0.3 * s.decay;
     const n = this.noise(t, dur * 1.3 + 0.08);

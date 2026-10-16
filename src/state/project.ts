@@ -1,7 +1,7 @@
 // Project defaults, the demo song, and the global store with undo/redo and
 // autosave.
 
-import type { DrumSound, DrumTrack, DrumVoice, Note, Patch, Project, SynthTrack, Track } from './types';
+import type { DrumSound, DrumTrack, DrumVoice, Note, Patch, Project, StepParams, SynthTrack, Track, TrigParams } from './types';
 import { defaultFx, findPreset, initPatch } from './presets';
 
 export const BAR_OPTIONS = [1, 2, 4, 8, 16, 32];
@@ -151,6 +151,52 @@ export function normalizePatch(raw: unknown): Patch {
   return fill(initPatch(), raw);
 }
 
+function num(v: unknown, min: number, max: number): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined;
+}
+
+function normalizeTrig(t: TrigParams): TrigParams {
+  const out: TrigParams = {};
+  const chance = num(t.chance, 0, 100);
+  if (chance !== undefined && chance < 100) out.chance = Math.round(chance);
+  const c = t.cond;
+  if (Array.isArray(c) && c.length === 2) {
+    const b = Math.round(Math.min(16, Math.max(2, +c[1] || 0)));
+    const a = Math.round(Math.min(b, Math.max(1, +c[0] || 0)));
+    if (b >= 2) out.cond = [a, b];
+  }
+  return out;
+}
+
+function normalizeLocks(raw: DrumTrack['locks'], steps: number): DrumTrack['locks'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: NonNullable<DrumTrack['locks']> = {};
+  for (const k of DRUM_KEYS) {
+    const src = raw[k];
+    if (!src || typeof src !== 'object') continue;
+    const dst: Record<number, StepParams> = {};
+    for (const [key, v] of Object.entries(src)) {
+      const step = Number(key);
+      if (!Number.isInteger(step) || step < 0 || step >= steps || !v) continue;
+      const sp: StepParams = { ...normalizeTrig(v) };
+      const set = (name: 'tune' | 'decay' | 'level' | 'pan' | 'nudge', min: number, max: number) => {
+        const x = num(v[name], min, max);
+        if (x !== undefined) sp[name] = x;
+      };
+      set('tune', -24, 24);
+      set('decay', 0.2, 3);
+      set('level', 0, 1);
+      set('pan', -1, 1);
+      set('nudge', -0.45, 0.45);
+      const r = num(v.ratchet, 1, 4);
+      if (r !== undefined && Math.round(r) > 1) sp.ratchet = Math.round(r);
+      if (Object.keys(sp).length) dst[step] = sp;
+    }
+    if (Object.keys(dst).length) out[k] = dst;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export function normalizeProject(raw: unknown): Project {
   const r = raw as Partial<Project>;
   if (!r || !Array.isArray(r.tracks)) throw new Error('Not a LoopForge project file');
@@ -163,17 +209,29 @@ export function normalizeProject(raw: unknown): Project {
         const src = (t as DrumTrack).pattern?.[k] ?? [];
         d.pattern[k] = Array.from({ length: d.steps }, (_, j) => (src[j] === 2 ? 2 : src[j] ? 1 : 0));
       }
+      const locks = normalizeLocks((t as DrumTrack).locks, d.steps);
+      if (locks) d.locks = locks;
       return d;
     }
     const s = fill(synthTrack('Track', TRACK_COLORS[i % 5], 'Init'), t);
     s.patch = normalizePatch((t as SynthTrack).patch);
-    s.notes = ((t as SynthTrack).notes ?? []).map((n) => ({
-      id: newNoteId(),
-      pitch: Math.round(n.pitch),
-      start: +n.start,
-      dur: Math.max(0.01, +n.dur),
-      vel: Math.min(1, Math.max(0, +n.vel)),
-    }));
+    s.notes = ((t as SynthTrack).notes ?? []).map((n) => {
+      const note: Note = {
+        id: newNoteId(),
+        pitch: Math.round(n.pitch),
+        start: +n.start,
+        dur: Math.max(0.01, +n.dur),
+        vel: Math.min(1, Math.max(0, +n.vel)),
+      };
+      const cutoff = num(n.cutoff, -4, 4);
+      const res = num(n.res, 0.1, 20);
+      const pan = num(n.pan, -1, 1);
+      if (cutoff !== undefined) note.cutoff = cutoff;
+      if (res !== undefined) note.res = res;
+      if (pan !== undefined) note.pan = pan;
+      Object.assign(note, normalizeTrig(n));
+      return note;
+    });
     return s;
   });
   const out = { ...fill(base, { ...r, tracks: undefined }), version: 1 as const, tracks };

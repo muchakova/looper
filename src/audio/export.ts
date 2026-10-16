@@ -4,6 +4,7 @@
 // click or gap in a video editor.
 
 import type { Project } from '../state/types';
+import { cycleLength } from '../state/conditions';
 import { Engine, projectTail } from './engine';
 
 export interface ExportOptions {
@@ -42,8 +43,15 @@ export async function renderProject(
   // At least two warm-up loops: the very first pass through the loop can
   // differ slightly from the following ones (modulation start-up), so the
   // kept repetitions always come after a pass that itself repeated.
-  const warm = opts.seamless ? Math.min(8, Math.max(2, Math.ceil(tail / loopLen) + 1)) : 0;
-  const loops = warm + opts.repeats;
+  //
+  // With trig conditions the loop only repeats exactly after `cycle` passes,
+  // so warm-up and kept repetitions are whole cycles: the file then starts on
+  // pass 1 of the cycle and its end flows straight back into its start.
+  const cycle = opts.seamless ? cycleLength(proj) : 1;
+  const warmMin = Math.min(8, Math.max(2, Math.ceil(tail / loopLen) + 1));
+  const warm = opts.seamless ? Math.ceil(warmMin / cycle) * cycle : 0;
+  const repeats = opts.seamless ? Math.ceil(opts.repeats / cycle) * cycle : opts.repeats;
+  const loops = warm + repeats;
   const renderSec = PRE + loops * loopLen + (opts.seamless ? 0.05 : tail + 0.2);
   const ctx = new OfflineAudioContext(2, Math.ceil(renderSec * sr), sr);
   const engine = new Engine(ctx, () => proj);
@@ -51,12 +59,13 @@ export async function renderProject(
 
   // Schedule one bar at a time using suspend/resume: only the notes about to
   // play exist in the graph, which keeps long pieces fast and memory low.
-  const canSuspend = typeof ctx.suspend === 'function';
   const totalBeats = loops * L;
   const chunk = Math.min(4, L);
   const chunks = Math.ceil(totalBeats / chunk);
   engine.scheduleRange(0, chunk, beatToTime);
-  if (canSuspend && chunks > 1) {
+  let chunked = typeof ctx.suspend === 'function' && chunks > 1;
+  if (chunked) {
+    let rejected = false;
     const chunkSec = (chunk * 60) / proj.bpm;
     for (let k = 1; k < chunks; k++) {
       const at = beatToTime(k * chunk) - Math.min(0.5, chunkSec / 2);
@@ -68,18 +77,22 @@ export async function renderProject(
           return ctx.resume();
         })
         .catch(() => {
-          /* suspend rejected (unsupported): handled below */
+          rejected = true;
         });
     }
-  } else {
-    engine.scheduleRange(chunk, totalBeats, beatToTime);
+    // Some browsers (Firefox) refuse suspend() on offline contexts. That shows
+    // up as an immediate rejection, before rendering starts, so check for it
+    // and fall back to scheduling everything up front.
+    await new Promise((r) => setTimeout(r, 0));
+    if (rejected) chunked = false;
   }
+  if (!chunked) engine.scheduleRange(chunk, totalBeats, beatToTime);
 
   const full = await ctx.startRendering();
   onProgress?.(1);
 
   const start = Math.round((PRE + warm * loopLen) * sr);
-  const len = opts.seamless ? Math.round(opts.repeats * loopLen * sr) : full.length - start;
+  const len = opts.seamless ? Math.round(repeats * loopLen * sr) : full.length - start;
   const out = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: sr });
   for (let c = 0; c < 2; c++) {
     out.copyToChannel(full.getChannelData(c).subarray(start, start + len), c);

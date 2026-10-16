@@ -3,6 +3,7 @@
 
 import { changed, commit, previewChord, previewNote, transport } from '../app';
 import { buildChord, CHORD_LABELS, inScale, NOTE_NAMES, SNAP_OPTIONS, snapToScale, type ChordMode } from '../state/music';
+import { condLabel, hasTrig, nextCond } from '../state/conditions';
 import { newNoteId, store } from '../state/project';
 import type { Note, SynthTrack } from '../state/types';
 import { h, select, toggle } from './dom';
@@ -27,7 +28,62 @@ interface Settings {
   chord: ChordMode;
   scaleLock: boolean;
   ghosts: boolean;
+  lane: NoteLane;
 }
+
+/** What the lane under the piano roll edits for each note. */
+type NoteLane = 'vel' | 'cutoff' | 'res' | 'pan' | 'chance' | 'cond';
+
+interface LaneDef {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  bipolar?: boolean;
+  /** Current value, falling back to the patch/default when not locked. */
+  get: (n: Note, t: SynthTrack) => number;
+  locked: (n: Note) => boolean;
+  /** Write a value; `undefined` (or the default) removes the lock. */
+  set: (n: Note, v: number | undefined, t: SynthTrack) => void;
+  fmt: (v: number) => string;
+}
+
+const NOTE_LANES: Record<Exclude<NoteLane, 'cond'>, LaneDef> = {
+  vel: {
+    label: 'VELOCITY', min: 0.05, max: 1, step: 0.01,
+    get: (n) => n.vel, locked: () => true,
+    set: (n, v) => (n.vel = v ?? 0.8), fmt: (v) => `${Math.round(v * 100)}`,
+  },
+  cutoff: {
+    label: 'CUTOFF', min: -4, max: 4, step: 0.1, bipolar: true,
+    get: (n) => n.cutoff ?? 0, locked: (n) => n.cutoff !== undefined,
+    set: (n, v) => (v === undefined || Math.abs(v) < 0.05 ? delete n.cutoff : (n.cutoff = v)), fmt: (v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`,
+  },
+  res: {
+    label: 'RESO', min: 0.1, max: 20, step: 0.1,
+    get: (n, t) => n.res ?? t.patch.filter.res, locked: (n) => n.res !== undefined,
+    set: (n, v, t) => (v === undefined || Math.abs(v - t.patch.filter.res) < 0.05 ? delete n.res : (n.res = v)), fmt: (v) => v.toFixed(1),
+  },
+  pan: {
+    label: 'PAN', min: -1, max: 1, step: 0.05, bipolar: true,
+    get: (n) => n.pan ?? 0, locked: (n) => n.pan !== undefined,
+    set: (n, v) => (v === undefined || Math.abs(v) < 0.03 ? delete n.pan : (n.pan = v)), fmt: (v) => (Math.abs(v) < 0.03 ? 'C' : v < 0 ? `L${Math.round(-v * 100)}` : `R${Math.round(v * 100)}`),
+  },
+  chance: {
+    label: 'CHANCE', min: 0, max: 100, step: 5,
+    get: (n) => n.chance ?? 100, locked: (n) => n.chance !== undefined,
+    set: (n, v) => (v === undefined || v >= 100 ? delete n.chance : (n.chance = v)), fmt: (v) => `${Math.round(v)}%`,
+  },
+};
+
+const LANE_OPTIONS: [NoteLane, string][] = [
+  ['vel', 'Velocity'],
+  ['cutoff', 'Cutoff'],
+  ['res', 'Resonance'],
+  ['pan', 'Pan'],
+  ['chance', 'Chance'],
+  ['cond', 'Condition'],
+];
 
 export class PianoRoll {
   readonly el: HTMLElement;
@@ -49,7 +105,7 @@ export class PianoRoll {
   private hoverCursor = 'default';
   private hover: { pitch: number; beat: number; x: number; y: number } | null = null;
   private readonly toolbarControls: { refresh(): void }[] = [];
-  private settings: Settings = { snap: '1/16', chord: 'off', scaleLock: true, ghosts: true };
+  private settings: Settings = { snap: '1/16', chord: 'off', scaleLock: true, ghosts: true, lane: 'vel' };
   private dragChanged = false;
 
   constructor() {
@@ -109,7 +165,16 @@ export class PianoRoll {
       },
       { title: 'Show notes of the other tracks faintly' },
     );
-    this.toolbarControls.push(snapSel, chordSel, lock, ghosts);
+    const laneSel = select(
+      LANE_OPTIONS,
+      () => this.settings.lane,
+      (v) => {
+        this.settings.lane = v;
+        save();
+      },
+      { title: 'What the lane under the notes edits: velocity, or a per-note sound lock / trig condition', 'aria-label': 'Note lane' },
+    );
+    this.toolbarControls.push(snapSel, chordSel, lock, ghosts, laneSel);
 
     const toolbar = h(
       'div',
@@ -118,6 +183,7 @@ export class PianoRoll {
       h('label', { class: 'tb-field' }, h('span', {}, 'Draw'), chordSel),
       lock,
       ghosts,
+      h('label', { class: 'tb-field' }, h('span', {}, 'Lane'), laneSel),
       h('div', { class: 'tb-sep' }),
       h('button', { class: 'btn ghost', type: 'button', onclick: () => this.quantize(), title: 'Snap selected notes (or all) to the grid' }, 'Quantize'),
       h('button', { class: 'btn ghost', type: 'button', onclick: () => this.duplicate(), title: 'Duplicate selection (Ctrl/Cmd+D)' }, 'Duplicate'),
@@ -147,6 +213,11 @@ export class PianoRoll {
     this.vel.addEventListener('pointermove', (e) => this.onVelMove(e));
     this.vel.addEventListener('pointerup', (e) => this.onVelUp(e));
     this.vel.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    this.vel.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      this.clearLaneAt(e);
+    });
+    this.vel.addEventListener('dblclick', (e) => this.clearLaneAt(e));
 
     const loop = () => {
       if (this.dirty || transport.playing) this.draw();
@@ -173,6 +244,12 @@ export class PianoRoll {
 
   setChordMode(mode: ChordMode): void {
     this.settings.chord = mode;
+    this.refresh();
+  }
+
+  /** Pick what the lane under the notes edits (used by the tutorial). */
+  setLane(lane: NoteLane): void {
+    this.settings.lane = lane;
     this.refresh();
   }
 
@@ -482,34 +559,63 @@ export class PianoRoll {
     this.invalidate();
   }
 
-  // ── Velocity lane ─────────────────────────────────────────────────────
+  // ── Note lane: velocity, per-note locks and trig conditions ──────────
 
-  private setVelAt(e: PointerEvent): void {
+  /** Notes whose start is under x in the lane (only selected ones if any). */
+  private notesAt(x: number): Note[] {
     const t = this.track();
-    if (!t) return;
-    const { x, y } = this.local(e, this.vel);
-    const v = Math.max(0.05, Math.min(1, 1 - (y - 6) / (VEL_H - 12)));
+    if (!t) return [];
     const pool = this.selected.size ? t.notes.filter((n) => this.selected.has(n.id)) : t.notes;
-    let hitAny = false;
-    for (const n of pool) {
-      if (Math.abs(this.xOf(n.start) - x) <= Math.max(5, this.snap * this.ppb * 0.4)) {
-        n.vel = v;
-        hitAny = true;
-      }
-    }
-    if (hitAny) {
+    return pool.filter((n) => Math.abs(this.xOf(n.start) - x) <= Math.max(5, this.snap * this.ppb * 0.4));
+  }
+
+  private setLaneAt(e: PointerEvent): void {
+    const t = this.track();
+    if (!t || this.settings.lane === 'cond') return;
+    const def = NOTE_LANES[this.settings.lane];
+    const { x, y } = this.local(e, this.vel);
+    const norm = Math.max(0, Math.min(1, 1 - (y - 6) / (VEL_H - 12)));
+    const v = +(Math.round((def.min + norm * (def.max - def.min)) / def.step) * def.step).toFixed(3);
+    const hits = this.notesAt(x);
+    for (const n of hits) def.set(n, v, t);
+    if (hits.length) {
       this.dragChanged = true;
       changed('notes');
     }
   }
+
+  private clearLaneAt(e: MouseEvent): void {
+    const t = this.track();
+    if (!t) return;
+    const hits = this.notesAt(this.local(e, this.vel).x);
+    for (const n of hits) {
+      if (this.settings.lane === 'cond') delete n.cond;
+      else NOTE_LANES[this.settings.lane].set(n, undefined, t);
+    }
+    if (hits.length) commit('notes');
+  }
+
   private onVelDown(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    if (this.settings.lane === 'cond') {
+      // Click cycles the condition of the notes under the cursor
+      const hits = this.notesAt(this.local(e, this.vel).x);
+      if (!hits.length) return;
+      const next = nextCond(hits[0].cond, e.shiftKey ? -1 : 1);
+      for (const n of hits) {
+        if (next) n.cond = next;
+        else delete n.cond;
+      }
+      commit('notes');
+      return;
+    }
     this.vel.setPointerCapture(e.pointerId);
     this.drag = { mode: 'velocity' };
     this.dragChanged = false;
-    this.setVelAt(e);
+    this.setLaneAt(e);
   }
   private onVelMove(e: PointerEvent): void {
-    if (this.drag?.mode === 'velocity') this.setVelAt(e);
+    if (this.drag?.mode === 'velocity') this.setLaneAt(e);
   }
   private onVelUp(e: PointerEvent): void {
     if (this.vel.hasPointerCapture(e.pointerId)) this.vel.releasePointerCapture(e.pointerId);
@@ -719,6 +825,15 @@ export class PianoRoll {
           g.lineWidth = 1.5;
           roundRect(g, x + 0.75, y + 1.75, w - 1.5, ROW_H - 3.5, 3);
           g.stroke();
+        } else if (hasTrig(n)) {
+          // Notes that don't play on every pass get a dashed outline
+          g.save();
+          g.setLineDash([3, 2]);
+          g.strokeStyle = 'rgba(255,255,255,0.85)';
+          g.lineWidth = 1;
+          roundRect(g, x + 0.5, y + 1.5, w - 1, ROW_H - 3, 3);
+          g.stroke();
+          g.restore();
         }
         if (w > 26) {
           g.fillStyle = 'rgba(10,12,16,0.85)';
@@ -832,12 +947,23 @@ export class PianoRoll {
     const dpr = window.devicePixelRatio || 1;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const W = this.w;
+    const lane = this.settings.lane;
     g.fillStyle = col('--panel');
     g.fillRect(0, 0, W, VEL_H);
     g.fillStyle = col('--muted');
     g.font = '600 9px Inter, system-ui, sans-serif';
     g.textBaseline = 'middle';
-    g.fillText('VELOCITY', 6, 12);
+    g.fillText(lane === 'cond' ? 'COND' : NOTE_LANES[lane].label, 6, 12);
+    g.fillStyle = col('--dim');
+    g.font = '500 8px Inter, system-ui, sans-serif';
+    g.fillText(lane === 'cond' ? 'click' : 'drag', 6, 26);
+    const tip =
+      lane === 'vel'
+        ? 'Drag to set how hard each note plays'
+        : lane === 'cond'
+          ? 'Click a note to choose on which passes it plays (A:B = pass A of every B). Right-click clears.'
+          : `Drag to lock ${NOTE_LANES[lane].label.toLowerCase()} per note. Right-click or double-click resets to the patch.`;
+    if (this.vel.title !== tip) this.vel.title = tip;
     g.fillStyle = col('--roll-line');
     g.fillRect(KEY_W, VEL_H / 2, W - KEY_W, 1);
     const t = this.track();
@@ -846,19 +972,33 @@ export class PianoRoll {
     g.beginPath();
     g.rect(KEY_W, 0, W - KEY_W, VEL_H);
     g.clip();
+    const span = VEL_H - 12;
     for (const n of t.notes) {
       const x = this.xOf(n.start);
       if (x < KEY_W - 4 || x > W) continue;
-      const top = 6 + (1 - n.vel) * (VEL_H - 12);
       const sel = this.selected.has(n.id);
-      g.fillStyle = sel ? '#fff' : hexA(accent, 0.85);
-      g.fillRect(Math.round(x), top, 2, VEL_H - 6 - top);
+      if (lane === 'cond') {
+        if (!n.cond && !sel) continue;
+        g.fillStyle = sel ? '#fff' : hexA(accent, 0.9);
+        g.font = '700 10px JetBrains Mono, monospace';
+        g.fillText(condLabel(n.cond).replace('Always', '·'), x + 2, VEL_H / 2 + 0.5);
+        continue;
+      }
+      const def = NOTE_LANES[lane];
+      const v = def.get(n, t);
+      const norm = (v - def.min) / (def.max - def.min);
+      const locked = def.locked(n);
+      const top = 6 + (1 - norm) * span;
+      const base = def.bipolar ? 6 + (1 - (0 - def.min) / (def.max - def.min)) * span : VEL_H - 6;
+      g.fillStyle = sel ? '#fff' : hexA(accent, locked ? 0.9 : 0.3);
+      g.fillRect(Math.round(x), Math.min(top, base), 2, Math.max(1, Math.abs(base - top)));
       g.beginPath();
-      g.arc(x + 1, top, 3, 0, Math.PI * 2);
+      g.arc(x + 1, top, locked ? 3 : 2, 0, Math.PI * 2);
       g.fill();
     }
     g.restore();
   }
+
 }
 
 function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

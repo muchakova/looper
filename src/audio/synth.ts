@@ -8,6 +8,13 @@ import { ChannelStrip, setParam, type Timing } from './channel';
 import { driveCurve, holdAt, mulberry32, noiseBuffer, pulseWave } from './dsp';
 
 const MAX_VOICES = 12;
+
+/** Per-note sound overrides ("parameter locks" from the piano roll). */
+export interface NoteMods {
+  cutoff?: number; // octaves relative to the patch cutoff
+  res?: number; // filter Q, replaces the patch value
+  pan?: number; // -1..1
+}
 const MIN_GAIN = 0.0001;
 
 interface OscUnit {
@@ -26,6 +33,8 @@ class Voice {
   releaseTime = Infinity;
   endTime = Infinity;
   private filterBase = 1000;
+  private cutoffOct = 0;
+  private resLock: number | undefined;
 
   constructor(
     private readonly ctx: BaseAudioContext,
@@ -34,9 +43,12 @@ class Voice {
     pitch: number,
     t: number,
     seed: number,
+    mods?: NoteMods,
   ) {
     this.pitch = pitch;
     this.startTime = t;
+    this.cutoffOct = mods?.cutoff ?? 0;
+    this.resLock = mods?.res;
     const rand = mulberry32(seed);
     const f = patch.filter;
 
@@ -58,15 +70,22 @@ class Voice {
     for (let i = 0; i < stages; i++) {
       const bf = ctx.createBiquadFilter();
       bf.type = f.type;
-      // Two cascaded resonant stages ring too much; soften the first one.
-      bf.Q.value = stages === 2 && i === 0 ? Math.min(f.res, 0.707) : f.res;
+      bf.Q.value = qFor(stages, i, this.resLock ?? f.res);
       tail.connect(bf);
       tail = bf;
       this.filters.push(bf);
     }
     this.amp = ctx.createGain();
     this.amp.gain.value = 0;
-    tail.connect(this.amp).connect(synth.strip.input);
+    tail.connect(this.amp);
+    if (mods?.pan !== undefined && Math.abs(mods.pan) > 0.001) {
+      // Only panned notes get a panner, so unpanned voices render exactly as before.
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = mods.pan;
+      this.amp.connect(pan).connect(synth.strip.input);
+    } else {
+      this.amp.connect(synth.strip.input);
+    }
     this.setFilterBase(patch);
 
     // Oscillators (each with unison copies)
@@ -141,17 +160,14 @@ class Voice {
   setFilterBase(patch: Patch): void {
     const f = patch.filter;
     const nyq = this.ctx.sampleRate / 2 - 100;
-    this.filterBase = Math.min(nyq, f.cutoff * Math.pow(2, ((this.pitch - 60) / 12) * f.keyTrack));
+    this.filterBase = Math.min(nyq, f.cutoff * Math.pow(2, ((this.pitch - 60) / 12) * f.keyTrack + this.cutoffOct));
     for (const bf of this.filters) setParam(this.ctx, bf.frequency, this.filterBase);
   }
 
   /** Live param updates while the note is sounding. */
   update(patch: Patch): void {
     this.setFilterBase(patch);
-    this.filters.forEach((bf, i) => {
-      const q = this.filters.length === 2 && i === 0 ? Math.min(patch.filter.res, 0.707) : patch.filter.res;
-      setParam(this.ctx, bf.Q, q);
-    });
+    this.filters.forEach((bf, i) => setParam(this.ctx, bf.Q, qFor(this.filters.length, i, this.resLock ?? patch.filter.res)));
     for (const l of this.levels) {
       const lv =
         l.key === 'osc1' ? patch.osc1.level : l.key === 'osc2' ? patch.osc2.level : l.key === 'sub' ? patch.sub.level : patch.noise.level;
@@ -159,15 +175,29 @@ class Voice {
     }
   }
 
-  /** Start (or retrigger) the envelopes at `t`. */
-  trigger(patch: Patch, vel: number, t: number, legato: boolean): void {
+  /** New per-note overrides for a reused (mono) voice, applied exactly at `t`. */
+  setModsAt(patch: Patch, mods: NoteMods | undefined, t: number): void {
+    const cutoff = mods?.cutoff ?? 0;
+    const res = mods?.res;
+    if (cutoff === this.cutoffOct && res === this.resLock) return;
+    this.cutoffOct = cutoff;
+    this.resLock = res;
+    const f = patch.filter;
+    const nyq = this.ctx.sampleRate / 2 - 100;
+    this.filterBase = Math.min(nyq, f.cutoff * Math.pow(2, ((this.pitch - 60) / 12) * f.keyTrack + cutoff));
+    this.filters.forEach((bf, i) => {
+      bf.frequency.setValueAtTime(this.filterBase, t);
+      bf.Q.setValueAtTime(qFor(this.filters.length, i, res ?? f.res), t);
+    });
+  }
+
+  /** Start (`isNew`) or retrigger the envelopes at `t`. */
+  trigger(patch: Patch, vel: number, t: number, isNew: boolean): void {
     const vs = patch.voice.velSens;
     const peak = (1 - vs + vs * vel) * patch.gain;
-    if (!legato) {
-      envAttack(this.amp.gain, patch.ampEnv, peak, t, true);
-      const amt = patch.filter.envAmt * 1200 * (1 - vs * 0.5 + vs * 0.5 * vel);
-      for (const bf of this.filters) envAttack(bf.detune, patch.filtEnv, amt, t, false);
-    }
+    envAttack(this.amp.gain, patch.ampEnv, peak, t, isNew ? MIN_GAIN : undefined);
+    const amt = patch.filter.envAmt * 1200 * (1 - vs * 0.5 + vs * 0.5 * vel);
+    for (const bf of this.filters) envAttack(bf.detune, patch.filtEnv, amt, t, isNew ? 0 : undefined);
   }
 
   /** Mono legato: drop the pending release and settle at the sustain level. */
@@ -217,7 +247,10 @@ class Voice {
   revive(): void {
     this.releaseTime = Infinity;
     this.endTime = Infinity;
-    for (const s of this.sources) s.stop(1e9);
+    // Push the pending stop far out (a later stop() replaces an earlier one).
+    // Firefox rejects very large times, so use "one day from now", not 1e9.
+    const far = this.ctx.currentTime + 86400;
+    for (const s of this.sources) s.stop(far);
   }
 
   private stopAt(t: number): void {
@@ -245,11 +278,24 @@ class Voice {
   }
 }
 
-function envAttack(param: AudioParam, env: Env, peak: number, t: number, fromZeroish: boolean): void {
+/** Two cascaded resonant stages ring too much, so the first one is softened. */
+function qFor(stages: number, i: number, res: number): number {
+  return stages === 2 && i === 0 ? Math.min(res, 0.707) : res;
+}
+
+/**
+ * Attack + decay towards sustain, starting at `t`.
+ *
+ * `startAt` anchors a brand-new voice: without an event at `t` the ramp would
+ * begin when it was *scheduled* (up to a bar earlier during export), so the
+ * note would fade in before it is due. Retriggered voices pass undefined and
+ * continue from wherever their envelope is at `t`.
+ */
+function envAttack(param: AudioParam, env: Env, peak: number, t: number, startAt?: number): void {
   holdAt(param, t);
   const a = Math.max(0.002, env.a);
   const d = Math.max(0.005, env.d);
-  if (fromZeroish && a <= 0.003) param.setValueAtTime(MIN_GAIN, t);
+  if (startAt !== undefined) param.setValueAtTime(startAt, t);
   param.linearRampToValueAtTime(peak, t + a);
   param.setTargetAtTime(peak * env.s, t + a, d / 4);
 }
@@ -359,8 +405,8 @@ export class SynthEngine {
   }
 
   /** Schedule a note with a known length (sequencer / export). */
-  playNote(pitch: number, vel: number, t: number, tOff: number, seed?: number, fresh = false): void {
-    const v = this.noteOn(pitch, vel, t, seed, fresh);
+  playNote(pitch: number, vel: number, t: number, tOff: number, seed?: number, fresh = false, mods?: NoteMods): void {
+    const v = this.noteOn(pitch, vel, t, seed, fresh, mods);
     if (v) this.noteOff(v, tOff);
   }
 
@@ -372,7 +418,7 @@ export class SynthEngine {
    * that keeps running across the loop point would be at a different phase
    * every time round and click at the seam.
    */
-  noteOn(pitch: number, vel: number, t: number, seed?: number, fresh = false): Voice | null {
+  noteOn(pitch: number, vel: number, t: number, seed?: number, fresh = false, mods?: NoteMods): Voice | null {
     const p = this.patch;
     if (p.voice.mode === 'mono' && !fresh) {
       const cur = this.mono;
@@ -381,8 +427,9 @@ export class SynthEngine {
         const legato = cur.releaseTime > t;
         cur.revive();
         cur.glideTo(pitch, t, p.voice.glide);
+        cur.setModsAt(p, mods, t);
         if (legato) cur.continueLegato(p, vel, t);
-        else cur.trigger(p, vel, t, false);
+        else cur.trigger(p, vel, t, false); // retrigger from the current level
         return cur;
       }
     }
@@ -392,8 +439,8 @@ export class SynthEngine {
       live.sort((a, b) => a.startTime - b.startTime);
       live[0].kill(t);
     }
-    const v = new Voice(this.ctx, this, p, pitch, t, seed ?? 1e6 + this.seed++);
-    v.trigger(p, vel, t, false);
+    const v = new Voice(this.ctx, this, p, pitch, t, seed ?? 1e6 + this.seed++, mods);
+    v.trigger(p, vel, t, true);
     this.voices.push(v);
     if (p.voice.mode === 'mono') {
       const old = this.mono;

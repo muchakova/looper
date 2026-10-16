@@ -408,7 +408,7 @@ input {
   /* The row must not grow with its content (tall drum grids, many tracks):
      the editor and the track list scroll inside it instead. */
   grid-template-rows: minmax(0, 1fr);
-  height: min(62vh, 640px);
+  height: clamp(420px, 70vh, 760px);
   min-height: 380px;
   border-bottom: 1px solid var(--border);
 }
@@ -581,7 +581,8 @@ input {
 .seq-scroll {
   flex: 1;
   overflow: auto;
-  padding: 10px;
+  /* extra bottom room: overlay scrollbars (macOS) must not cover the lane */
+  padding: 10px 10px 22px;
 }
 .seq-grid {
   display: flex;
@@ -1197,4 +1198,164 @@ kbd {
 }
 .track-ctrls .k-label {
   line-height: 12px;
+}
+
+/* ── Step lane (per-step locks & conditions) ──────────────────────────── */
+
+.seq-cell {
+  position: relative;
+}
+.seq-cell.has-lock::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 0 1px #0008;
+}
+.seq-cell.has-cond::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  border: 1.5px solid #fff;
+  opacity: 0.9;
+}
+.seq-name.lane-on {
+  border-color: var(--accent-2);
+  box-shadow: inset 3px 0 0 var(--accent-2);
+}
+.seq-lane-row {
+  align-items: stretch;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.lane-ctrl {
+  width: 238px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.lane-ctrl .sel {
+  height: 26px;
+  font-size: 12px;
+}
+.lane-ctrl small {
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.3;
+}
+.lane-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.seq-lane {
+  display: grid;
+  grid-template-columns: repeat(var(--steps, 16), var(--cell, 34px));
+  gap: 4px;
+  height: 84px;
+  touch-action: none;
+  user-select: none;
+}
+.lane-cell {
+  position: relative;
+  border-radius: 5px;
+  background: #151921;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  cursor: ns-resize;
+}
+.lane-cell.bar-start {
+  box-shadow: -4px 0 0 -2px var(--border-2);
+}
+.lane-cell.inactive {
+  opacity: 0.28;
+  cursor: default;
+}
+.lane-bar {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-2) 28%, transparent);
+}
+.lane-cell.locked .lane-bar {
+  background: var(--accent-2);
+}
+.lane-cell.locked {
+  border-color: color-mix(in srgb, var(--accent-2) 60%, transparent);
+}
+.lane-val {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font: 600 9px var(--mono);
+  color: #fff;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+}
+.lane-cell.cond-mode {
+  cursor: pointer;
+}
+.lane-cell.cond-mode .lane-val {
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+}
+.pass-badge {
+  font: 600 11px var(--mono);
+  color: var(--accent-2);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 50%, transparent);
+  border-radius: 10px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Compact drum rows: knob values show only while hovering or turning */
+.seq-knobs .knob svg {
+  width: 26px;
+  height: 26px;
+}
+.seq-knobs .knob {
+  padding: 0;
+}
+.seq-knobs .k-val {
+  display: none;
+}
+.seq-knobs .knob:hover .k-label,
+.seq-knobs .knob.active .k-label,
+.seq-knobs .knob:focus-visible .k-label {
+  display: none;
+}
+.seq-knobs .knob:hover .k-val,
+.seq-knobs .knob.active .k-val,
+.seq-knobs .knob:focus-visible .k-val {
+  display: block;
+  height: auto;
+  font-size: 9px;
+  line-height: 12px;
+}
+.seq-knobs .k-label {
+  line-height: 12px;
+}
+.lane-selects {
+  display: flex;
+  gap: 6px;
+}
+.lane-selects .sel {
+  flex: 1;
+  min-width: 0;
 }

@@ -11,6 +11,7 @@ export class Transport {
   private bpm = 120;
   private scheduledTo = 0;
   private timer: number | null = null;
+  private reported = false;
 
   constructor(
     private readonly ctx: AudioContext,
@@ -58,6 +59,13 @@ export class Transport {
     return b % L;
   }
 
+  /** Which pass through the loop is playing (0-based), or null when stopped. */
+  pass(): number | null {
+    if (!this.playing) return null;
+    const b = this.timeToBeat(this.ctx.currentTime - (this.ctx.outputLatency || 0));
+    return Math.max(0, Math.floor(b / (this.engine.project.bars * 4)));
+  }
+
   private beatToTime = (b: number): number => this.anchorTime + ((b - this.anchorBeat) * 60) / this.bpm;
 
   private timeToBeat(t: number): number {
@@ -68,8 +76,15 @@ export class Transport {
     // Background tabs throttle timers to ~1 s, so look further ahead there.
     const lookahead = document.hidden ? 1.6 : 0.16;
     const to = this.timeToBeat(this.ctx.currentTime + lookahead);
-    if (to > this.scheduledTo) {
+    if (to <= this.scheduledTo) return;
+    try {
       this.engine.scheduleRange(this.scheduledTo, to, this.beatToTime);
+    } catch (err) {
+      // Never retry the same range: a repeated error would re-create the same
+      // voices every 25 ms and lock up the CPU. Report once and move on.
+      if (!this.reported) console.error('LoopForge scheduler error:', err);
+      this.reported = true;
+    } finally {
       this.scheduledTo = to;
     }
   }

@@ -6,6 +6,7 @@ import { encodeWav, peakDb, renderProject, type ExportOptions } from '../audio/e
 import { NOTE_NAMES, SCALES } from '../state/music';
 import { BAR_OPTIONS, blankProject, demoProject, normalizeProject, store } from '../state/project';
 import { SAMPLES } from '../state/samples';
+import { cycleLength } from '../state/conditions';
 import { h, icon, segmented, select, toast } from './dom';
 import { fmt, knob } from './knob';
 import { Scope } from './scope';
@@ -20,6 +21,8 @@ export class TopBar {
   private undoBtn: HTMLButtonElement;
   private redoBtn: HTMLButtonElement;
   private nameInput: HTMLInputElement;
+  /** Shows "Pass 2/4" while playing a loop that varies over several passes. */
+  private passEl = h('span', { class: 'pass-badge', hidden: true, title: 'This loop changes from pass to pass (trig conditions). The pattern repeats exactly after the last pass.' });
 
   constructor() {
     const P = () => store.project;
@@ -149,6 +152,7 @@ export class TopBar {
         { class: 'tb-group transport' },
         this.playBtn,
         h('label', { class: 'tb-field' }, h('span', {}, 'BPM'), this.bpmInput),
+        this.passEl,
         h('div', { class: 'tb-field' }, h('span', {}, 'Bars'), bars),
         swing,
       ),
@@ -168,6 +172,15 @@ export class TopBar {
       new Scope().el,
     );
     this.refresh();
+    const tick = () => {
+      const pass = transport.pass();
+      const cycle = cycleLength(store.project);
+      const show = pass !== null && cycle > 1;
+      this.passEl.hidden = !show;
+      if (show) this.passEl.textContent = `Pass ${(pass % cycle) + 1}/${cycle}`;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   refresh(): void {
@@ -213,8 +226,13 @@ export function openExport(): void {
   const loopSec = (p.bars * 4 * 60) / p.bpm;
   const o = { ...exportOpts };
   const info = h('p', { class: 'dlg-info' });
+  const cycle = cycleLength(p);
   const updateInfo = () => {
-    info.textContent = `${p.bars} bar${p.bars > 1 ? 's' : ''} × ${o.repeats} = ${(loopSec * o.repeats).toFixed(2)} s at ${p.bpm} BPM`;
+    const reps = o.seamless ? Math.ceil(o.repeats / cycle) * cycle : o.repeats;
+    info.textContent = `${p.bars} bar${p.bars > 1 ? 's' : ''} × ${reps} = ${(loopSec * reps).toFixed(2)} s at ${p.bpm} BPM`;
+    if (cycle > 1 && o.seamless) {
+      info.textContent += ` — this loop changes over ${cycle} passes (trig conditions), so the file contains all ${cycle} to stay seamless.`;
+    }
   };
   const progress = h('div', { class: 'progress', hidden: true }, h('div', { class: 'progress-fill' }));
   const status = h('p', { class: 'dlg-status', role: 'status' });
@@ -234,7 +252,7 @@ export function openExport(): void {
     field('Repeats', segmented<number>([[1, '×1'], [2, '×2'], [4, '×4'], [8, '×8']], () => o.repeats, (v) => { o.repeats = v; updateInfo(); }), 'How many times the loop is written into the file.'),
     field(
       'Seamless loop',
-      segmented<string>([['on', 'On'], ['off', 'Off (with tail)']], () => (o.seamless ? 'on' : 'off'), (v) => (o.seamless = v === 'on')),
+      segmented<string>([['on', 'On'], ['off', 'Off (with tail)']], () => (o.seamless ? 'on' : 'off'), (v) => { o.seamless = v === 'on'; updateInfo(); }),
       'On: reverb/delay tails wrap to the start so the file repeats without a click. Off: the file ends with the natural fade-out.',
     ),
     field('Normalize', segmented<string>([['on', 'On (−0.3 dB)'], ['off', 'Off']], () => (o.normalize ? 'on' : 'off'), (v) => (o.normalize = v === 'on'))),
