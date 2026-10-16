@@ -137,20 +137,32 @@ export class Engine {
     const swing = p.swing * SWING_MAX;
     const swung = (b: number) => b + (isOdd16th(b) ? swing : 0);
 
+    // Re-sync every LFO at each loop start. Free-running oscillators drift a
+    // little per repetition, which would make repeats differ and the loop seam
+    // audible; restarting keeps every repetition identical (live and export).
+    for (let k = Math.max(1, Math.ceil(from / L)); k * L < to; k++) {
+      this.restartModulation(beatToTime(k * L));
+    }
+
     p.tracks.forEach((t, ti) => {
       if (t.kind === 'synth') {
         const eng = this.synth(ti)!;
-        const events: { at: number; end: number; pitch: number; vel: number; id: number }[] = [];
+        const events: { at: number; end: number; pitch: number; vel: number; id: number; fresh: boolean }[] = [];
+        // Notes at the earliest position start a fresh mono voice every repetition
+        let first = Infinity;
+        let firstPitch = Infinity;
+        for (const n of t.notes) if (n.start < L) first = Math.min(first, n.start);
+        for (const n of t.notes) if (n.start === first) firstPitch = Math.min(firstPitch, n.pitch);
         const k0 = Math.floor((from - SWING_MAX) / L);
         const k1 = Math.floor(to / L);
         for (let k = k0; k <= k1; k++) {
           for (const n of t.notes) {
             const at = k * L + swung(n.start);
-            if (at >= from && at < to && n.start < L) events.push({ at, end: k * L + n.start + n.dur, pitch: n.pitch, vel: n.vel, id: n.id });
+            if (at >= from && at < to && n.start < L) events.push({ at, end: k * L + n.start + n.dur, pitch: n.pitch, vel: n.vel, id: n.id, fresh: n.start === first && n.pitch === firstPitch });
           }
         }
         events.sort((a, b) => a.at - b.at || a.pitch - b.pitch);
-        for (const e of events) eng.playNote(e.pitch, e.vel, beatToTime(e.at), beatToTime(Math.max(e.end, e.at + 0.02)), e.id * 7919 + ti);
+        for (const e of events) eng.playNote(e.pitch, e.vel, beatToTime(e.at), beatToTime(Math.max(e.end, e.at + 0.02)), e.id * 7919 + ti, e.fresh);
       } else {
         const eng = this.drums(ti)!;
         const stepLen = 0.25;

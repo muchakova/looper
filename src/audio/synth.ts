@@ -359,18 +359,22 @@ export class SynthEngine {
   }
 
   /** Schedule a note with a known length (sequencer / export). */
-  playNote(pitch: number, vel: number, t: number, tOff: number, seed?: number): void {
-    const v = this.noteOn(pitch, vel, t, seed);
+  playNote(pitch: number, vel: number, t: number, tOff: number, seed?: number, fresh = false): void {
+    const v = this.noteOn(pitch, vel, t, seed, fresh);
     if (v) this.noteOff(v, tOff);
   }
 
   /**
    * `seed` fixes the oscillator phases of a voice. The sequencer passes the
    * note id so every loop repetition renders identically (seamless export).
+   * `fresh` makes a mono track start a new voice instead of gliding on: the
+   * sequencer sets it at the start of each loop repetition, because a voice
+   * that keeps running across the loop point would be at a different phase
+   * every time round and click at the seam.
    */
-  noteOn(pitch: number, vel: number, t: number, seed?: number): Voice | null {
+  noteOn(pitch: number, vel: number, t: number, seed?: number, fresh = false): Voice | null {
     const p = this.patch;
-    if (p.voice.mode === 'mono') {
+    if (p.voice.mode === 'mono' && !fresh) {
       const cur = this.mono;
       if (cur && cur.endTime > t + 0.005) {
         // Overlapping notes play legato: glide without restarting envelopes.
@@ -392,7 +396,12 @@ export class SynthEngine {
     v.trigger(p, vel, t, false);
     this.voices.push(v);
     if (p.voice.mode === 'mono') {
-      if (this.mono && this.mono !== v) this.mono.kill(t);
+      const old = this.mono;
+      if (old && old !== v && old.endTime > t) {
+        // A fresh loop start lets the previous note ring out naturally.
+        if (fresh) old.release(p, Math.min(t, old.releaseTime));
+        else old.kill(t);
+      }
       this.mono = v;
     }
     return v;

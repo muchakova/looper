@@ -5,6 +5,7 @@ import { changed, commit, togglePlay, transport } from '../app';
 import { encodeWav, peakDb, renderProject, type ExportOptions } from '../audio/export';
 import { NOTE_NAMES, SCALES } from '../state/music';
 import { BAR_OPTIONS, blankProject, demoProject, normalizeProject, store } from '../state/project';
+import { SAMPLES } from '../state/samples';
 import { h, icon, segmented, select, toast } from './dom';
 import { fmt, knob } from './knob';
 import { Scope } from './scope';
@@ -123,18 +124,20 @@ export class TopBar {
 
     const newMenu = h(
       'select',
-      { class: 'sel new-sel', 'aria-label': 'New project', title: 'Start a new project' },
+      { class: 'sel new-sel', 'aria-label': 'New project or sample', title: 'Start a new project or open a ready-made sample' },
       h('option', { value: '' }, 'New…'),
-      h('option', { value: 'blank' }, 'Empty project'),
-      h('option', { value: 'demo' }, 'Demo loop'),
+      h('optgroup', { label: 'New' }, h('option', { value: 'blank' }, 'Empty project'), h('option', { value: 'demo' }, 'Demo loop')),
+      h('optgroup', { label: 'Samples' }, ...SAMPLES.map((s) => h('option', { value: `sample:${s.id}` }, s.label))),
     );
     newMenu.addEventListener('change', () => {
       const v = newMenu.value;
       newMenu.value = '';
       if (!v) return;
-      if (!confirm('Start a new project? (You can still undo this.)')) return;
+      const sample = SAMPLES.find((s) => `sample:${s.id}` === v);
+      if (!confirm(sample ? `Open the sample “${sample.label}”? (You can still undo this.)` : 'Start a new project? (You can still undo this.)')) return;
       transport.stop();
-      store.load(v === 'demo' ? demoProject() : blankProject());
+      store.load(sample ? sample.load() : v === 'demo' ? demoProject() : blankProject());
+      if (sample) toast(`Opened sample “${store.project.name}”`);
     });
 
     this.el = h(

@@ -23,16 +23,31 @@ export async function renderProject(
   const sr = opts.sampleRate;
   const L = proj.bars * 4;
   const loopSec = (L * 60) / proj.bpm;
-  const beatToTime = (b: number) => (b * 60) / proj.bpm;
+  // Web Audio processes in blocks of 128 frames, and some timing lands on
+  // block boundaries. If every repetition starts on a block boundary, every
+  // repetition renders identically, so seamless loops are rounded to whole
+  // blocks (at most ±1.3 ms per loop — far below anything audible).
+  const block = 128 / sr;
+  const loopLen = opts.seamless ? Math.max(block, Math.round(loopSec / block) * block) : loopSec;
+  // A short pre-roll lets the first notes start slightly early (free-running
+  // oscillator phase) exactly like every later repetition does.
+  const PRE = Math.ceil(0.25 / block) * block;
+  const beatToTime = (b: number) => {
+    const k = Math.floor(b / L + 1e-9);
+    return PRE + k * loopLen + ((b - k * L) * 60) / proj.bpm;
+  };
 
   const tail = projectTail(proj);
 
-  const warm = opts.seamless ? Math.min(8, Math.max(1, Math.ceil(tail / loopSec))) : 0;
+  // At least two warm-up loops: the very first pass through the loop can
+  // differ slightly from the following ones (modulation start-up), so the
+  // kept repetitions always come after a pass that itself repeated.
+  const warm = opts.seamless ? Math.min(8, Math.max(2, Math.ceil(tail / loopLen) + 1)) : 0;
   const loops = warm + opts.repeats;
-  const renderSec = loops * loopSec + (opts.seamless ? 0.05 : tail + 0.2);
+  const renderSec = PRE + loops * loopLen + (opts.seamless ? 0.05 : tail + 0.2);
   const ctx = new OfflineAudioContext(2, Math.ceil(renderSec * sr), sr);
   const engine = new Engine(ctx, () => proj);
-  engine.restartModulation(0);
+  engine.restartModulation(PRE);
 
   // Schedule one bar at a time using suspend/resume: only the notes about to
   // play exist in the graph, which keeps long pieces fast and memory low.
@@ -42,9 +57,9 @@ export async function renderProject(
   const chunks = Math.ceil(totalBeats / chunk);
   engine.scheduleRange(0, chunk, beatToTime);
   if (canSuspend && chunks > 1) {
-    const chunkSec = beatToTime(chunk);
+    const chunkSec = (chunk * 60) / proj.bpm;
     for (let k = 1; k < chunks; k++) {
-      const at = k * chunkSec - Math.min(0.5, chunkSec / 2);
+      const at = beatToTime(k * chunk) - Math.min(0.5, chunkSec / 2);
       ctx
         .suspend(at)
         .then(() => {
@@ -63,8 +78,8 @@ export async function renderProject(
   const full = await ctx.startRendering();
   onProgress?.(1);
 
-  const start = Math.round(warm * loopSec * sr);
-  const len = opts.seamless ? Math.round(opts.repeats * loopSec * sr) : full.length - start;
+  const start = Math.round((PRE + warm * loopLen) * sr);
+  const len = opts.seamless ? Math.round(opts.repeats * loopLen * sr) : full.length - start;
   const out = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: sr });
   for (let c = 0; c < 2; c++) {
     out.copyToChannel(full.getChannelData(c).subarray(start, start + len), c);
